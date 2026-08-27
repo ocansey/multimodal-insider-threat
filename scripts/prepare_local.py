@@ -76,12 +76,14 @@ def check_raw(raw: Path) -> None:
             "cannot be built without it, and it is what the whole peer-relative "
             "method rests on."
         )
-    answers = (raw / "answers").is_dir() or (raw / "answers.csv").exists()
+    answers = ((raw / "answers").is_dir() or (raw / "answers.csv").exists()
+               or (raw.parent / "answers").is_dir())
     if not answers:
         print(
             "WARNING: no answers/ directory or answers.csv found. The pipeline "
             "will run, but with no labels there is nothing to evaluate against. "
-            "Extract answers.tar.bz2 into the same directory.",
+            "Extract answers.tar.bz2 next to the activity files, or pass "
+            "--answers /path/to/answers.",
             file=sys.stderr,
         )
 
@@ -118,6 +120,9 @@ def main() -> int:
                     help="where to write the artefacts (default data/artifacts/cert)")
     ap.add_argument("--text-encoder", default="sentence-transformers",
                     choices=["sentence-transformers", "hashing"])
+    ap.add_argument("--answers", type=Path, default=None,
+                    help="explicit path to the extracted answers directory, "
+                         "if it did not land next to the activity files")
     ap.add_argument("--sample-users", type=int, default=0,
                     help="prepare only the first N users, for a trial run")
     args = ap.parse_args()
@@ -138,7 +143,9 @@ def main() -> int:
     out = (args.out or cfg.path("artifacts") / "cert").expanduser()
     started = time.time()
     bundle = prepare(raw, cfg, text_encoder_kind=args.text_encoder,
-                     synthetic=False)
+                     synthetic=False,
+                     answers_dir=args.answers.expanduser().resolve()
+                     if args.answers else None)
     save(bundle, out)
 
     total = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())

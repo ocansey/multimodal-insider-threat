@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 import numpy as np
@@ -259,7 +260,8 @@ def encode_documents(docs: list[list[str]], encoder, max_docs: int, dim: int
 # --------------------------------------------------------------------------
 # labels and splits
 # --------------------------------------------------------------------------
-def load_answers(raw_dir: Path, day_start_hour: int) -> pd.DataFrame:
+def load_answers(raw_dir: Path, day_start_hour: int,
+                 answers_dir: Path | None = None) -> pd.DataFrame:
     """Malicious events, reduced to the user-days they fall on.
 
     The real release ships ``answers/`` as a directory of per-scenario CSVs
@@ -271,9 +273,17 @@ def load_answers(raw_dir: Path, day_start_hour: int) -> pd.DataFrame:
     single = raw_dir / "answers.csv"
     if single.exists():
         frames.append(pd.read_csv(single))
-    answers_dir = raw_dir / "answers"
-    if answers_dir.is_dir():
-        for path in sorted(answers_dir.rglob("*.csv")):
+
+    # The answers tarball extracts alongside the activity files as often as
+    # inside them, so look in both places rather than making the user move
+    # directories around. An explicit --answers path overrides both.
+    candidates = [answers_dir] if answers_dir else [
+        raw_dir / "answers", raw_dir.parent / "answers",
+    ]
+    answers_dir = next((c for c in candidates if c and Path(c).is_dir()), None)
+    if answers_dir:
+        log.info("reading answer files from %s", answers_dir)
+        for path in sorted(Path(answers_dir).rglob("*.csv")):
             try:
                 df = pd.read_csv(path, header=None, on_bad_lines="skip")
             except Exception:  # noqa: BLE001 - malformed answer files are common
@@ -295,16 +305,35 @@ def load_answers(raw_dir: Path, day_start_hour: int) -> pd.DataFrame:
     ans["user"] = ans["user"].astype(str)
     out = (ans.groupby(["user", "day"])["scenario"]
            .agg(lambda s: int(pd.Series(s).mode().iloc[0])).reset_index())
+    found = sorted(out["scenario"].unique())
     log.info("%d malicious user-days across %d users, scenarios %s",
-             len(out), out["user"].nunique(), sorted(out["scenario"].unique()))
+             len(out), out["user"].nunique(), found)
+    if found == [0]:
+        log.warning("every malicious day was labelled scenario 0 — the answer "
+                    "file naming was not recognised, so the per-scenario "
+                    "breakdown will be empty. Detection metrics are unaffected.")
     return out
 
 
+#: Answer files are named for the release *and* the scenario, e.g.
+#: ``r4.2-1.csv`` for scenario 1 of release 4.2. Splitting that on every
+#: separator and taking the first digit in range returns 2 — the release's
+#: minor version — and silently relabels every scenario in the study. The
+#: release prefix has to be matched and consumed before the scenario is read.
+_SCENARIO_RE = re.compile(r"r\d+(?:\.\d+)?-(\d)\b")
+
+
 def _scenario_from_path(path: Path) -> int:
+    """Scenario number from an answer file's name or its parent directory."""
+    for part in [path.name, *[p for p in path.parts[::-1]]]:
+        m = _SCENARIO_RE.search(part)
+        if m:
+            return int(m.group(1))
+    # Some layouts use a directory per scenario instead: "3/" or "scenario_3/".
     for part in path.parts[::-1]:
-        for token in part.replace("-", "_").replace(".", "_").split("_"):
-            if token.isdigit() and 1 <= int(token) <= 5:
-                return int(token)
+        m = re.fullmatch(r"(?:scenario[_-]?)?(\d)", part, flags=re.IGNORECASE)
+        if m and 1 <= int(m.group(1)) <= 5:
+            return int(m.group(1))
     return 0
 
 
@@ -353,6 +382,7 @@ def prepare(
     cfg,
     text_encoder_kind: str = "hashing",
     synthetic: bool = False,
+    answers_dir: Path | None = None,
 ) -> Bundle:
     raw_dir = Path(raw_dir)
     s_cfg, t_cfg = cfg.sessionisation, cfg.text
@@ -371,7 +401,7 @@ def prepare(
         after_hours_end=int(s_cfg["after_hours_end"]),
     )
 
-    answers = load_answers(raw_dir, int(s_cfg["day_start_hour"]))
+    answers = load_answers(raw_dir, int(s_cfg["day_start_hour"]), answers_dir)
     index = attach_labels_and_splits(sessions.index, answers, cfg.split)
 
     ldap = load_ldap(raw_dir)
