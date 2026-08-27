@@ -158,11 +158,18 @@ class Organisation:
         c, rng = self.cfg, self.rng
         chosen = rng.choice(self.people.index, c.n_insiders, replace=False)
         rows = []
+        # The campaign has to fit inside the back half of the period, which is
+        # not automatic for short runs: with 60 days and a 30-day campaign the
+        # earliest legal start is after the latest legal one. Clamp rather than
+        # crash, so a small fixture is still usable in a unit test.
+        earliest = int(c.n_days * 0.55)
         for k, idx in enumerate(chosen):
             scenario = int(c.scenario_mix[k % len(c.scenario_mix)])
-            length = int(rng.integers(*c.campaign_length_days))
-            # Campaigns start in the back half so the training window is clean.
-            start = int(rng.integers(int(c.n_days * 0.55), c.n_days - length - 1))
+            lo, hi = c.campaign_length_days
+            hi = min(hi, max(lo + 1, c.n_days - earliest - 1))
+            length = int(rng.integers(lo, max(lo + 1, hi)))
+            latest = max(earliest + 1, c.n_days - length - 1)
+            start = int(rng.integers(earliest, latest))
             rows.append({
                 "user": self.people.loc[idx, "user"],
                 "scenario": scenario,

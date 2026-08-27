@@ -7,16 +7,17 @@ most informative documents per user-day, encodes them once with a sentence
 transformer, projects the embeddings down, and writes about 300 MB of arrays
 that contain no raw message content at all.
 
-    # 1. get the data
-    #    https://kilthub.cmu.edu/articles/dataset/Insider_Threat_Test_Dataset/12841247
-    tar xjf r4.2.tar.bz2
-    tar xjf answers.tar.bz2
+    # extraction is optional — point --raw at the tarball or its folder
+    python scripts/prepare_local.py --raw ~/Downloads --out data/artifacts/cert
 
-    # 2. install what the encoder needs (skip if using --text-encoder hashing)
-    pip install -r requirements.txt sentence-transformers
-
-    # 3. reduce
+    # or, if you did extract
     python scripts/prepare_local.py --raw ~/Downloads/r4.2 --out data/artifacts/cert
+
+Extracted, the release is about 3 GB and http.csv is 1.7 GB of that. If the
+disk cannot spare it, do not extract: the loader reads members straight out of
+the .tar.bz2. That costs roughly double the read time for http.csv, since
+bzip2 cannot seek and the pipeline reads each table twice, and it costs no
+disk at all.
 
 Expect twenty minutes to an hour, dominated by reading http.csv and by the
 encoder. Everything is streamed, so peak memory stays around 4 GB.
@@ -50,64 +51,84 @@ import pandas as pd  # noqa: E402
 from mint.artifacts import save  # noqa: E402
 from mint.config import load_config  # noqa: E402
 from mint.prepare import prepare  # noqa: E402
+from mint.sessionise import read_activity  # noqa: E402
+from mint.sources import Release, describe  # noqa: E402
 
 REQUIRED = ["logon.csv", "device.csv", "file.csv", "http.csv", "email.csv"]
 
 
-def check_raw(raw: Path) -> None:
-    missing = [f for f in REQUIRED if not (raw / f).exists()]
+def check_release(release: Release) -> None:
+    """Fail early and usefully rather than three minutes into a read."""
+    missing = [f for f in REQUIRED if not release.exists(f)]
     if missing:
-        # A very common shape: the tarball extracts into a nested directory.
-        nested = [d for d in raw.iterdir() if d.is_dir()
-                  and (d / "logon.csv").exists()]
-        if nested:
-            raise SystemExit(
-                f"{raw} has no activity files, but {nested[0]} does.\n"
-                f"Point --raw at {nested[0]} instead."
-            )
+        # The commonest shape: --raw points at the folder holding the release
+        # rather than the release itself.
+        if release.directory:
+            nested = [d for d in release.directory.iterdir()
+                      if d.is_dir() and (d / "logon.csv").exists()]
+            if nested:
+                raise SystemExit(
+                    f"{release.root} has no activity files, but {nested[0]} "
+                    f"does.\nPoint --raw at {nested[0]} instead."
+                )
         raise SystemExit(
-            f"missing from {raw}: {', '.join(missing)}\n"
-            "Extract r4.2.tar.bz2 and point --raw at the directory that "
-            "contains logon.csv."
+            f"cannot find {', '.join(missing)} in {describe(release)}.\n\n"
+            "Point --raw at one of:\n"
+            "  the directory containing logon.csv, or\n"
+            "  the r4.2.tar.bz2 file itself (no extraction needed), or\n"
+            "  the folder holding the tarballs."
         )
-    if not (raw / "LDAP").is_dir():
+    if not release.list_dir("LDAP"):
         raise SystemExit(
-            f"{raw}/LDAP is missing. The organisational context modality "
-            "cannot be built without it, and it is what the whole peer-relative "
-            "method rests on."
+            "no LDAP snapshots found. The organisational context modality "
+            "cannot be built without them, and the peer-relative method rests "
+            "on it."
         )
-    answers = ((raw / "answers").is_dir() or (raw / "answers.csv").exists()
-               or (raw.parent / "answers").is_dir())
-    if not answers:
+    if not (release.list_dir("answers") or release.exists("answers.csv")):
         print(
-            "WARNING: no answers/ directory or answers.csv found. The pipeline "
-            "will run, but with no labels there is nothing to evaluate against. "
-            "Extract answers.tar.bz2 next to the activity files, or pass "
-            "--answers /path/to/answers.",
+            "WARNING: no answer files found. The pipeline will run, but with "
+            "no labels there is nothing to evaluate against. Point --answers "
+            "at answers.tar.bz2 or the extracted directory.",
             file=sys.stderr,
         )
 
 
-def maybe_subset(raw: Path, n_users: int, workdir: Path) -> Path:
-    """Write a smaller copy covering the first N users, for a trial run."""
+def maybe_subset(release: Release, n_users: int, workdir: Path) -> Path:
+    """Write a smaller copy covering the first N users, for a trial run.
+
+    Reads through the same source layer as everything else, so it works
+    against an unextracted tarball too — which is the case where a trial run
+    matters most, because a full streaming pass is the slow one.
+    """
     print(f"building a {n_users}-user subset under {workdir} …")
     workdir.mkdir(parents=True, exist_ok=True)
-    users = None
+    users: set[str] | None = None
     for name in REQUIRED:
+        stem = name.replace(".csv", "")
         frames = []
-        for chunk in pd.read_csv(raw / name, chunksize=500_000, low_memory=False):
+        for chunk in read_activity(release, stem):
             if users is None:
                 users = set(sorted(chunk["user"].astype(str).unique())[:n_users])
             frames.append(chunk[chunk["user"].astype(str).isin(users)])
-        pd.concat(frames, ignore_index=True).to_csv(workdir / name, index=False)
-        print(f"  {name}")
-    for extra in ("psychometric.csv", "answers.csv"):
-        if (raw / extra).exists():
-            shutil.copy(raw / extra, workdir / extra)
-    if (raw / "LDAP").is_dir():
-        shutil.copytree(raw / "LDAP", workdir / "LDAP", dirs_exist_ok=True)
-    if (raw / "answers").is_dir():
-        shutil.copytree(raw / "answers", workdir / "answers", dirs_exist_ok=True)
+        if frames:
+            pd.concat(frames, ignore_index=True).to_csv(workdir / name, index=False)
+            print(f"  {name}")
+
+    with release.open("psychometric.csv") as stream:
+        if stream is not None:
+            pd.read_csv(stream).to_csv(workdir / "psychometric.csv", index=False)
+    for dirname in ("LDAP", "answers"):
+        refs = release.list_dir(dirname)
+        if not refs:
+            continue
+        (workdir / dirname).mkdir(exist_ok=True)
+        for ref in refs:
+            target = workdir / dirname / Path(ref.split("::")[-1]).name
+            with release.open_path(ref) as stream:
+                target.write_bytes(stream.read())
+    with release.open("answers.csv") as stream:
+        if stream is not None:
+            (workdir / "answers.csv").write_bytes(stream.read())
     return workdir
 
 
@@ -115,14 +136,15 @@ def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--raw", required=True, type=Path,
-                    help="directory holding logon.csv, http.csv, LDAP/ …")
+                    help="the extracted release directory, the r4.2.tar.bz2 "
+                         "file itself, or the folder holding the tarballs")
     ap.add_argument("--out", type=Path, default=None,
                     help="where to write the artefacts (default data/artifacts/cert)")
     ap.add_argument("--text-encoder", default="sentence-transformers",
                     choices=["sentence-transformers", "hashing"])
     ap.add_argument("--answers", type=Path, default=None,
-                    help="explicit path to the extracted answers directory, "
-                         "if it did not land next to the activity files")
+                    help="answers.tar.bz2 or the extracted answers directory, "
+                         "if it is not beside the activity files")
     ap.add_argument("--sample-users", type=int, default=0,
                     help="prepare only the first N users, for a trial run")
     args = ap.parse_args()
@@ -133,19 +155,20 @@ def main() -> int:
 
     cfg = load_config()
     cfg.ensure_dirs()
-    raw = args.raw.expanduser().resolve()
-    check_raw(raw)
+    extra = [args.answers.expanduser().resolve()] if args.answers else None
+    release = Release(args.raw.expanduser().resolve(), extra=extra)
+    print(f"reading from: {describe(release)}\n")
+    check_release(release)
 
     if args.sample_users:
-        raw = maybe_subset(raw, args.sample_users,
-                           cfg.path("raw") / f"subset_{args.sample_users}")
+        release = Release(maybe_subset(
+            release, args.sample_users,
+            cfg.path("raw") / f"subset_{args.sample_users}"))
 
     out = (args.out or cfg.path("artifacts") / "cert").expanduser()
     started = time.time()
-    bundle = prepare(raw, cfg, text_encoder_kind=args.text_encoder,
-                     synthetic=False,
-                     answers_dir=args.answers.expanduser().resolve()
-                     if args.answers else None)
+    bundle = prepare(release, cfg, text_encoder_kind=args.text_encoder,
+                     synthetic=False)
     save(bundle, out)
 
     total = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())

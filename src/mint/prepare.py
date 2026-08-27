@@ -40,6 +40,7 @@ from .sessionise import (
     sessionise,
     typed_events,
 )
+from .sources import Release, describe
 from .text import build_encoder, pool_documents
 
 log = logging.getLogger(__name__)
@@ -48,18 +49,28 @@ log = logging.getLogger(__name__)
 # --------------------------------------------------------------------------
 # organisational context
 # --------------------------------------------------------------------------
-def load_ldap(raw_dir: Path) -> pd.DataFrame:
+def load_ldap(release: Release) -> pd.DataFrame:
     """All monthly LDAP snapshots, stacked with the month they describe."""
-    ldap_dir = raw_dir / "LDAP"
-    if not ldap_dir.is_dir():
-        raise FileNotFoundError(f"no LDAP directory under {raw_dir}")
+    references = release.list_dir("LDAP")
+    if not references:
+        raise FileNotFoundError(
+            f"no LDAP snapshots found in {describe(release)}. The "
+            "organisational context modality cannot be built without them, "
+            "and the peer-relative method rests on it."
+        )
     frames = []
-    for path in sorted(ldap_dir.glob("*.csv")):
-        snap = pd.read_csv(path)
-        snap["snapshot"] = pd.Timestamp(path.stem + "-01")
+    for ref in sorted(references):
+        stem = Path(ref.split("::")[-1]).stem
+        try:
+            snapshot = pd.Timestamp(stem + "-01")
+        except ValueError:
+            continue
+        with release.open_path(ref) as stream:
+            snap = pd.read_csv(stream)
+        snap["snapshot"] = snapshot
         frames.append(snap)
     if not frames:
-        raise FileNotFoundError(f"no LDAP snapshots in {ldap_dir}")
+        raise FileNotFoundError("LDAP files were found but none parsed")
     out = pd.concat(frames, ignore_index=True)
     out = out.rename(columns={"user_id": "user"})
     log.info("loaded %d LDAP snapshots covering %d people",
@@ -67,12 +78,12 @@ def load_ldap(raw_dir: Path) -> pd.DataFrame:
     return out
 
 
-def load_psychometric(raw_dir: Path) -> pd.DataFrame:
-    path = raw_dir / "psychometric.csv"
-    if not path.exists():
-        log.warning("no psychometric.csv — the Big Five columns will be zero")
-        return pd.DataFrame(columns=["user", "O", "C", "E", "A", "N"])
-    df = pd.read_csv(path).rename(columns={"user_id": "user"})
+def load_psychometric(release: Release) -> pd.DataFrame:
+    with release.open("psychometric.csv") as stream:
+        if stream is None:
+            log.warning("no psychometric.csv — the Big Five columns will be zero")
+            return pd.DataFrame(columns=["user", "O", "C", "E", "A", "N"])
+        df = pd.read_csv(stream).rename(columns={"user_id": "user"})
     return df[["user", "O", "C", "E", "A", "N"]]
 
 
@@ -140,7 +151,7 @@ def resolve_context(
 # text
 # --------------------------------------------------------------------------
 def collect_documents(
-    raw_dir: Path, doc_refs: list[list[tuple[str, int]]], max_docs: int,
+    release: Release, doc_refs: list[list[tuple[str, int]]], max_docs: int,
     sources: list[str],
 ) -> list[list[str]]:
     """Pull the text for each user-day's sampled events.
@@ -161,7 +172,7 @@ def collect_documents(
         if column is None or not wanted[source]:
             continue
         offset = 0
-        for chunk in read_activity(raw_dir, source):
+        for chunk in read_activity(release, source):
             ids = np.arange(offset, offset + len(chunk))
             offset += len(chunk)
             hits = np.isin(ids, list(wanted[source]))
@@ -260,8 +271,7 @@ def encode_documents(docs: list[list[str]], encoder, max_docs: int, dim: int
 # --------------------------------------------------------------------------
 # labels and splits
 # --------------------------------------------------------------------------
-def load_answers(raw_dir: Path, day_start_hour: int,
-                 answers_dir: Path | None = None) -> pd.DataFrame:
+def load_answers(release: Release, day_start_hour: int) -> pd.DataFrame:
     """Malicious events, reduced to the user-days they fall on.
 
     The real release ships ``answers/`` as a directory of per-scenario CSVs
@@ -270,29 +280,26 @@ def load_answers(raw_dir: Path, day_start_hour: int,
     against is a loader that fails on the real thing.
     """
     frames = []
-    single = raw_dir / "answers.csv"
-    if single.exists():
-        frames.append(pd.read_csv(single))
+    with release.open("answers.csv") as stream:
+        if stream is not None:
+            frames.append(pd.read_csv(stream))
 
-    # The answers tarball extracts alongside the activity files as often as
-    # inside them, so look in both places rather than making the user move
-    # directories around. An explicit --answers path overrides both.
-    candidates = [answers_dir] if answers_dir else [
-        raw_dir / "answers", raw_dir.parent / "answers",
-    ]
-    answers_dir = next((c for c in candidates if c and Path(c).is_dir()), None)
-    if answers_dir:
-        log.info("reading answer files from %s", answers_dir)
-        for path in sorted(Path(answers_dir).rglob("*.csv")):
-            try:
-                df = pd.read_csv(path, header=None, on_bad_lines="skip")
-            except Exception:  # noqa: BLE001 - malformed answer files are common
-                continue
-            if df.shape[1] < 4:
-                continue
-            df = df.rename(columns={0: "kind", 1: "id", 2: "date", 3: "user"})
-            df["scenario"] = _scenario_from_path(path)
-            frames.append(df[["id", "date", "user", "scenario"]])
+    # The answers tarball unpacks beside the activity files as often as inside
+    # them, and may not have been unpacked at all. All three are handled.
+    references = release.list_dir("answers")
+    if references:
+        log.info("reading %d answer files", len(references))
+    for ref in sorted(references):
+        try:
+            with release.open_path(ref) as stream:
+                df = pd.read_csv(stream, header=None, on_bad_lines="skip")
+        except Exception:  # noqa: BLE001 - malformed answer files are common
+            continue
+        if df.shape[1] < 4:
+            continue
+        df = df.rename(columns={0: "kind", 1: "id", 2: "date", 3: "user"})
+        df["scenario"] = _scenario_from_path(Path(ref.split("::")[-1]))
+        frames.append(df[["id", "date", "user", "scenario"]])
 
     if not frames:
         log.warning("no answer files found — evaluation will be impossible")
@@ -378,16 +385,17 @@ def attach_labels_and_splits(
 # the whole preparation
 # --------------------------------------------------------------------------
 def prepare(
-    raw_dir: Path,
+    raw_dir: Path | Release,
     cfg,
     text_encoder_kind: str = "hashing",
     synthetic: bool = False,
     answers_dir: Path | None = None,
 ) -> Bundle:
-    raw_dir = Path(raw_dir)
+    release = raw_dir if isinstance(raw_dir, Release) else Release(
+        Path(raw_dir), extra=[answers_dir] if answers_dir else None)
     s_cfg, t_cfg = cfg.sessionisation, cfg.text
 
-    events = typed_events(raw_dir, int(s_cfg["day_start_hour"]))
+    events = typed_events(release, int(s_cfg["day_start_hour"]))
     days = pd.DatetimeIndex(np.sort(events["day"].unique()))
     n_train = int(len(days) * float(cfg.split["train_fraction"]))
     own_pc, shared = machine_context(events, days[:n_train],
@@ -401,14 +409,14 @@ def prepare(
         after_hours_end=int(s_cfg["after_hours_end"]),
     )
 
-    answers = load_answers(raw_dir, int(s_cfg["day_start_hour"]), answers_dir)
+    answers = load_answers(release, int(s_cfg["day_start_hour"]))
     index = attach_labels_and_splits(sessions.index, answers, cfg.split)
 
-    ldap = load_ldap(raw_dir)
-    psych = load_psychometric(raw_dir)
+    ldap = load_ldap(release)
+    psych = load_psychometric(release)
     context, vocab = resolve_context(index, ldap, psych)
 
-    docs = collect_documents(raw_dir, sessions.doc_refs,
+    docs = collect_documents(release, sessions.doc_refs,
                              int(t_cfg["max_docs_per_day"]), list(t_cfg["sources"]))
     encoder = build_encoder(text_encoder_kind, t_cfg["encoder"],
                             int(t_cfg["dim"]), seed=cfg.seed)
@@ -426,13 +434,13 @@ def prepare(
         "context_vocabulary": {k: len(v) for k, v in vocab.items()},
         "n_documents": int(sum(len(d) for d in docs)),
         "content_reduction": reduction,
-        "source_dir": str(raw_dir),
+        "source": describe(release),
     }
     if synthetic:
         manifest["warning"] = (
             "Built from mint.simulate output. Not a result under any circumstances."
         )
-        fixture_manifest = raw_dir / "manifest.json"
+        fixture_manifest = Path(release.directory or ".") / "manifest.json"
         if fixture_manifest.exists():
             with open(fixture_manifest, "r", encoding="utf-8") as fh:
                 manifest["fixture"] = json.load(fh)

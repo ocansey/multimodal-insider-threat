@@ -45,6 +45,7 @@ import numpy as np
 import pandas as pd
 
 from .schema import ACTIVITY_FILES, PAD_ID, TOKEN_TO_ID
+from .sources import Release
 
 log = logging.getLogger(__name__)
 
@@ -62,22 +63,30 @@ SOURCE_BUDGET = {"logon": 12, "device": 16, "file": 32, "email": 36, "http": 32}
 # --------------------------------------------------------------------------
 # reading
 # --------------------------------------------------------------------------
+def _as_release(source: "Release | Path | str") -> Release:
+    """Accept a Release, a directory, or an archive path interchangeably."""
+    return source if isinstance(source, Release) else Release(Path(source))
+
+
 def read_activity(
-    raw_dir: Path, name: str, chunksize: int | None = 500_000
+    release: "Release | Path", name: str, chunksize: int | None = 500_000
 ) -> Iterator[pd.DataFrame]:
-    """Yield chunks of one activity file, or the whole thing if it is small.
+    """Yield chunks of one activity table, wherever it physically lives.
 
     The real ``http.csv`` is 1.7 GB and will not fit comfortably in memory
-    alongside a model, so everything downstream is written to consume an
-    iterator even when there is only one chunk in it.
+    alongside a model, so everything downstream consumes an iterator even when
+    there is only one chunk in it. The source may be a plain CSV, a compressed
+    CSV, or a member inside the downloaded tarball — see :mod:`mint.sources`.
     """
-    path = raw_dir / f"{name}.csv"
-    if not path.exists():
-        log.warning("%s not found — skipping this source", path.name)
-        return
-    reader = pd.read_csv(path, chunksize=chunksize, low_memory=False)
-    for chunk in reader:
-        yield chunk
+    release = _as_release(release)
+    filename = f"{name}.csv"
+    with release.open(filename) as stream:
+        if stream is None:
+            log.warning("%s not found in %s — skipping this source",
+                        filename, release.root)
+            return
+        for chunk in pd.read_csv(stream, chunksize=chunksize, low_memory=False):
+            yield chunk
 
 
 def parse_dates(series: pd.Series) -> pd.Series:
@@ -166,15 +175,16 @@ def _addresses(row: pd.Series) -> list[str]:
     return out
 
 
-def typed_events(raw_dir: Path, day_start_hour: int) -> pd.DataFrame:
+def typed_events(release: "Release | Path", day_start_hour: int) -> pd.DataFrame:
     """One row per event: user, day, timestamp, token, pc, source, row index.
 
     Returns a long frame. On the real release this is roughly 30 million rows
     before capping, which is why the caller immediately reduces it.
     """
+    release = _as_release(release)
     frames = []
     for source in ACTIVITY_FILES:
-        for chunk in read_activity(raw_dir, source):
+        for chunk in read_activity(release, source):
             ts = parse_dates(chunk["date"])
             tokens = chunk.apply(lambda r, s=source: token_for(s, r), axis=1)
             frames.append(pd.DataFrame({
@@ -187,7 +197,7 @@ def typed_events(raw_dir: Path, day_start_hour: int) -> pd.DataFrame:
                 "event_id": chunk["id"].astype(str) if "id" in chunk else "",
             }))
     if not frames:
-        raise FileNotFoundError(f"no activity files found under {raw_dir}")
+        raise FileNotFoundError(f"no activity files found under {release.root}")
     ev = pd.concat(frames, ignore_index=True)
     ev = ev.dropna(subset=["ts"])
 

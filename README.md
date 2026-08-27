@@ -81,7 +81,7 @@ git clone https://github.com/ocansey/multimodal-insider-threat.git
 cd multimodal-insider-threat
 pip install -r requirements.txt
 
-make test     # 28 tests, no data required
+make test     # 32 tests, no data required
 make smoke    # generate a synthetic org, run the whole pipeline end to end
 ```
 
@@ -94,15 +94,16 @@ make smoke    # generate a synthetic org, run the whole pipeline end to end
 1. Download from CMU — free, no registration:
    [Insider Threat Test Dataset](https://kilthub.cmu.edu/articles/dataset/Insider_Threat_Test_Dataset/12841247). Take **`r4.2.tar.bz2`** and **`answers.tar.bz2`**.
 
-2. Extract and reduce. This runs where the data is and never moves the raw text anywhere:
+2. Reduce it. This runs where the data is and never moves the raw text anywhere:
 
 ```bash
-tar xjf r4.2.tar.bz2 && tar xjf answers.tar.bz2
 pip install sentence-transformers          # or use --text-encoder hashing
-python scripts/prepare_local.py --raw ~/Downloads/r4.2 --out data/artifacts/cert
+python scripts/prepare_local.py --raw ~/Downloads --out data/artifacts/cert
 ```
 
-Twenty minutes to an hour, mostly reading `http.csv` and running the encoder. Peak memory around 4 GB. Add `--sample-users 100` for a five-minute trial pass first.
+**Extraction is optional.** Unpacked, the release is about 3 GB and `http.csv` is 1.7 GB of that; added to the tarballs you already have, that is over four gigabytes of free disk for a study whose output is three hundred megabytes. If the space is not there, do not extract — point `--raw` at the tarball or the folder holding it and the loader streams members straight out of the archive. That costs roughly double the read time for `http.csv`, because bzip2 cannot seek and the pipeline reads each table twice, and it costs no disk at all.
+
+Twenty minutes to an hour either way, mostly reading `http.csv` and running the encoder. Peak memory around 4 GB. Add `--sample-users 100` for a five-minute trial pass first.
 
 3. Train and evaluate:
 
@@ -130,12 +131,15 @@ Four things in here were bugs first, and each is documented at the point where i
 
 **Sessionisation took eighteen seconds on a toy dataset**, which extrapolated to over an hour on the real release. Rewriting the per-source event budget as vectorised group arithmetic instead of a Python loop took it to half a second — a 37× speedup on the step that has to process thirty million rows.
 
+**Extraction ran the disk out of space**, halfway through `http.csv`, leaving a truncated file that still looked like a file. The fix was not to ask for a bigger disk: `mint/sources.py` resolves every table to a byte stream and reads members directly out of the `.tar.bz2`, so the release never has to be unpacked at all. A test asserts the archive path and the extracted path produce byte-identical token arrays, because a convenience that quietly changes the numbers is worse than the inconvenience it removes.
+
 ## Repository layout
 
 ```
 src/mint/
   schema.py       the CERT files as they actually arrive; the event vocabulary
   simulate.py     a synthetic organisation, for tests only — read its docstring
+  sources.py      resolves each table to a stream: directory, or straight from the tarball
   sessionise.py   five unsorted logs -> one ordered day per person
   text.py         the content modality; pretrained encoder and an offline floor
   prepare.py      raw release -> compact, transferable artefacts
@@ -147,7 +151,7 @@ src/mint/
   pipeline.py     one call, every table
 
 scripts/  prepare_local.py · run_experiment.py
-tests/    28 tests: invariants, hand-worked metrics, and the no-fake-results guard
+tests/    32 tests: invariants, hand-worked metrics, and the no-fake-results guard
 docs/     METHODOLOGY.md · DATA_CARD.md · ETHICS_AND_DEPLOYMENT.md
 config/   every threshold and split boundary a reviewer might argue with
 ```

@@ -248,3 +248,51 @@ def test_ablation_zeroes_the_intended_modality(bundle):
     no_content = _ablate(bundle, "no_content")
     assert not no_content.content.any()
     assert no_content.tokens.any(), "behaviour must survive a content ablation"
+
+
+# -- reading the release without unpacking it -------------------------------
+def test_a_tarball_and_a_directory_give_identical_results(fixture_dir, cfg, tmp_path):
+    """The disk-constrained path must not be a different pipeline.
+
+    Extracted, r4.2 needs about 3 GB of free space and http.csv is 1.7 GB of
+    it. Reading members straight out of the archive removes that requirement
+    entirely, which is only worth having if it produces the same numbers.
+    """
+    import tarfile
+
+    from mint.prepare import prepare
+    from mint.sources import Release
+
+    archive_dir = tmp_path / "packed"
+    archive_dir.mkdir()
+    with tarfile.open(archive_dir / "r4.2.tar.bz2", "w:bz2") as tf:
+        tf.add(fixture_dir, arcname="r4.2")
+
+    from_dir = prepare(fixture_dir, cfg, "hashing", synthetic=True)
+    from_tar = prepare(Release(archive_dir), cfg, "hashing", synthetic=True)
+
+    assert len(from_dir) == len(from_tar)
+    assert (from_dir.tokens == from_tar.tokens).all()
+    assert from_dir.n_labelled_malicious == from_tar.n_labelled_malicious
+
+
+def test_a_release_can_be_a_bare_tarball(fixture_dir, tmp_path):
+    import tarfile
+
+    from mint.sources import Release
+
+    path = tmp_path / "r4.2.tar.bz2"
+    with tarfile.open(path, "w:bz2") as tf:
+        tf.add(fixture_dir, arcname="r4.2")
+    release = Release(path)
+    assert release.exists("logon.csv")
+    assert release.list_dir("LDAP")
+
+
+def test_a_missing_table_is_reported_not_guessed(tmp_path):
+    from mint.sources import Release
+
+    (tmp_path / "logon.csv").write_text("id,date,user,pc,activity\n")
+    release = Release(tmp_path)
+    assert release.exists("logon.csv")
+    assert not release.exists("http.csv")
