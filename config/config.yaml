@@ -1,0 +1,124 @@
+# Every threshold, split boundary and hyper-parameter a reviewer might want to
+# argue with. Nothing that affects a reported number is hard-coded in the
+# package.
+
+paths:
+  raw: data/raw               # the extracted CERT release, never committed
+  artifacts: data/artifacts   # compact arrays produced by prepare_local.py
+  fixtures: data/fixtures     # synthetic smoke-test data, never a result
+  reports: reports
+  figures: reports/figures
+  tables: reports/tables
+
+data:
+  release: "r4.2"
+  source_url: "https://kilthub.cmu.edu/articles/dataset/Insider_Threat_Test_Dataset/12841247"
+  # Published shape of r4.2. Checked at load time so a partial extraction
+  # fails loudly instead of quietly changing the results.
+  expected:
+    n_users: 1000
+    n_scenarios: 3
+
+sessionisation:
+  # A "day" runs 04:00 to 04:00 rather than midnight to midnight. Night-shift
+  # staff and the after-hours exfiltration in scenario 1 both straddle
+  # midnight, and a calendar-day boundary splits a single sitting into two
+  # half-empty days on either side of the most interesting moment.
+  day_start_hour: 4
+  after_hours_start: 19
+  after_hours_end: 7
+  # Longest event sequence kept per user-day. The 99th percentile of a normal
+  # day is well under this; the tail is dominated by automated web traffic.
+  max_events_per_day: 128
+  # A machine used by more than this many distinct people is "shared".
+  shared_pc_min_users: 5
+  # Days with fewer events than this are dropped: an account that did nothing
+  # is not evidence of anything, and scoring it wastes analyst capacity.
+  min_events_per_day: 3
+
+text:
+  # Run on the analyst's own machine, not here. Any sentence encoder works;
+  # the manifest records which one was used so results stay comparable.
+  encoder: "sentence-transformers/all-MiniLM-L6-v2"
+  dim: 384
+  # Documents kept per user-day. Encoding all 28M http rows is neither
+  # necessary nor affordable; the sample is stratified by source so email is
+  # never crowded out by web traffic.
+  max_docs_per_day: 12
+  sources: ["email", "http", "file"]
+  # Embeddings are projected down before they are stored. At the encoder's
+  # native 384 dimensions the content array for the full release is 12 GB,
+  # which is neither transferable nor loadable; at 64 it is about 300 MB and
+  # retains most of the variance. The projection is a PCA fitted on the
+  # TRAINING WINDOW ONLY - fitting it on everything would let the test period
+  # shape the representation of the training period, which is leakage even
+  # though no label is involved.
+  reduce_dim: 64
+
+split:
+  # Chronological, because a SOC deploys forward in time. The exact dates are
+  # release-specific and resolved from the data, so these are fractions of the
+  # observed period rather than hard dates.
+  train_fraction: 0.50
+  calibrate_fraction: 0.15
+  test_fraction: 0.35
+  # Training uses no labels at all — the objective is self-supervised — but
+  # days belonging to a known campaign are still excluded from the training
+  # window, because a detector trained on the attack it is meant to find is
+  # not a detector.
+  exclude_known_malicious_from_training: true
+
+model:
+  seed: 20260826
+  d_model: 128
+  n_heads: 4
+  n_layers_behaviour: 4
+  n_layers_fusion: 2
+  dropout: 0.1
+  hour_embedding_dim: 16
+  context_dim: 64
+  # Fraction of event tokens replaced by <mask> during self-supervised
+  # training.
+  mask_probability: 0.15
+  # Weight on the cross-modal alignment loss relative to masked modelling.
+  alignment_weight: 0.5
+  temperature: 0.07
+
+training:
+  batch_size: 64
+  epochs: 12
+  # Cap on training user-days, sampled evenly across people. The full release
+  # has roughly 165,000 of them and the objective is self-supervised, so the
+  # marginal value of the hundred-thousandth ordinary Tuesday is close to zero
+  # while its wall-clock cost is not. Set to 0 to use everything.
+  max_train_rows: 40000
+  learning_rate: 0.0003
+  weight_decay: 0.01
+  warmup_steps: 200
+  grad_clip: 1.0
+  # Stop if the calibration-window loss has not improved in this many epochs.
+  patience: 3
+
+scoring:
+  # The four score components. Their weights are fitted on the calibration
+  # window by maximising precision at the operating capacity, never on test.
+  components: ["masked_behaviour", "cross_modal_disagreement",
+               "peer_distance", "self_distance"]
+  # Which population a user-day is judged unusual *against*. This is the
+  # experiment the project exists to run.
+  normalisation: "peer"        # one of: global | self | peer
+  # Peer groups smaller than this fall back to the next-coarsest grouping
+  # (role -> functional unit -> whole organisation).
+  min_peer_group: 15
+  # Days of a user's own history used to build the self-relative baseline.
+  self_history_days: 60
+
+operations:
+  # A SOC analyst can meaningfully review this many users per day. Everything
+  # in the evaluation is expressed against that budget rather than against a
+  # threshold nobody would ever set by hand.
+  daily_review_capacity: [5, 10, 25, 50]
+  default_capacity: 10
+  # An alert on any day of a user's campaign counts as catching that campaign.
+  # Reported alongside per-day precision, never instead of it.
+  campaign_credit_window_days: 0

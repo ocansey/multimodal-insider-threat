@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mint"
+version = "1.0.0"
+description = "Multimodal insider-threat detection with peer-relative scoring"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Isaiah Thompson Ocansey, PhD", email = "ocanthom@gmail.com" }]
+keywords = [
+    "insider threat", "anomaly detection", "multimodal transformer",
+    "cybersecurity", "user behaviour analytics", "self-supervised learning",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24", "pandas>=2.0", "scikit-learn>=1.3",
+    "PyYAML>=6.0", "torch>=2.0", "matplotlib>=3.7",
+]
+
+[project.optional-dependencies]
+text = ["sentence-transformers>=2.2"]
+dev = ["pytest>=7.4"]
+
+[project.urls]
+Repository = "https://github.com/ocansey/multimodal-insider-threat"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = ["ignore::FutureWarning", "ignore::DeprecationWarning", "ignore::UserWarning"]

@@ -1,0 +1,15 @@
+# Runtime.
+numpy>=1.24
+pandas>=2.0
+scikit-learn>=1.3
+PyYAML>=6.0
+torch>=2.0
+matplotlib>=3.7
+
+# Only needed by scripts/prepare_local.py when using the pretrained text
+# encoder. Skip it and pass --text-encoder hashing, which needs no download
+# and is a legitimate baseline in its own right.
+# sentence-transformers>=2.2
+
+# Development.
+pytest>=7.4

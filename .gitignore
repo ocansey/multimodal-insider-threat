@@ -1,0 +1,24 @@
+# The CERT release is ~1.5 GB and is not ours to redistribute. Download it
+# from CMU; scripts/prepare_local.py turns it into the artefacts below.
+data/raw/*
+!data/raw/.gitkeep
+data/artifacts/*
+!data/artifacts/.gitkeep
+data/fixtures/*
+!data/fixtures/.gitkeep
+
+# Synthetic-fixture output is never a result and never committed.
+reports/fixture/
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.DS_Store
+.idea/
+.vscode/
