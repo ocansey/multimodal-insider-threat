@@ -163,49 +163,151 @@ def _as_int(value) -> int:
 
 def _addresses(row: pd.Series) -> list[str]:
     """Every recipient address on a message, across to/cc/bcc."""
+    return _addresses_from_values(row.get("to"), row.get("cc"), row.get("bcc"))
+
+
+def tokens_for_frame(chunk: pd.DataFrame, source: str) -> np.ndarray:
+    """Vectorised token assignment for a whole chunk.
+
+    :func:`token_for` is the readable, row-at-a-time definition and it is what
+    the unit tests check. It is also unusable at scale: ``DataFrame.apply``
+    with ``axis=1`` builds a Series object per row, and at twenty-eight
+    million rows of web traffic that is roughly half an hour of pure overhead
+    per pass. This produces identical output with array operations, and
+    ``test_vectorised_tokens_match_the_row_definition`` asserts they agree.
+    """
+    n = len(chunk)
+    if source == "http":
+        return np.full(n, "http_visit", dtype=object)
+
+    if source == "logon":
+        act = chunk["activity"].astype(str).str.lower()
+        return np.where(act == "logon", "logon", "logoff")
+
+    if source == "device":
+        act = chunk["activity"].astype(str).str.lower()
+        return np.where(act == "connect", "device_connect", "device_disconnect")
+
+    if source == "file":
+        fn = chunk["filename"].astype(str)
+        removable = fn.str.startswith(REMOVABLE_PREFIXES)
+        return np.where(removable, "file_copy_to_removable", "file_open")
+
+    if source == "email":
+        senders = chunk.get("from", pd.Series([""] * n, index=chunk.index)) \
+            .map(_clean).to_numpy()
+        users = chunk.get("user", pd.Series([""] * n, index=chunk.index)) \
+            .map(_clean).to_numpy()
+        attach = chunk.get("attachments", pd.Series([0] * n, index=chunk.index)) \
+            .map(_as_int).to_numpy()
+
+        received = np.array([bool(u) and (u not in s)
+                             for u, s in zip(users, senders)])
+        domains = np.array([s.split("@")[-1] if "@" in s else "" for s in senders])
+        recipients = [
+            _addresses_from_values(to, cc, bcc)
+            for to, cc, bcc in zip(
+                chunk.get("to", pd.Series([""] * n, index=chunk.index)),
+                chunk.get("cc", pd.Series([""] * n, index=chunk.index)),
+                chunk.get("bcc", pd.Series([""] * n, index=chunk.index)))
+        ]
+        external = np.array([
+            bool(d) and any(not a.endswith("@" + d) for a in addrs)
+            for d, addrs in zip(domains, recipients)
+        ])
+
+        out = np.where(external, "email_send_external", "email_send_internal")
+        out = np.where(attach > 0, "email_send_with_attachment", out)
+        return np.where(received, "email_receive", out)
+
+    raise ValueError(f"unknown source {source}")
+
+
+def _addresses_from_values(to, cc, bcc) -> list[str]:
     out: list[str] = []
-    for field in ("to", "cc", "bcc"):
-        raw = _clean(row.get(field))
-        if not raw:
+    for raw in (to, cc, bcc):
+        text = _clean(raw)
+        if not text:
             continue
-        for part in raw.replace(",", ";").split(";"):
+        for part in text.replace(",", ";").split(";"):
             addr = part.strip()
             if "@" in addr:
                 out.append(addr)
     return out
 
 
+def _reduce_chunk(chunk: pd.DataFrame, source: str, day_start_hour: int
+                  ) -> pd.DataFrame:
+    """One chunk of raw CSV -> the eight small columns the pipeline needs.
+
+    Every column here is chosen for size as much as for content. The obvious
+    implementation keeps the raw frame and adds columns to it, which on the
+    real release means roughly three hundred bytes per row across thirty-two
+    million rows — about ten gigabytes, on a machine with eight. Categoricals
+    and 32-bit indices bring that under a gigabyte.
+
+    The event id is dropped outright. It is the natural thing to carry
+    "just in case", it is a 38-character string, and nothing downstream ever
+    reads it.
+    """
+    ts = parse_dates(chunk["date"])
+    keep = ts.notna()
+    chunk, ts = chunk.loc[keep], ts.loc[keep]
+
+    out = pd.DataFrame({
+        "user": chunk["user"].astype(str).astype("category"),
+        "ts": ts.to_numpy(),
+        "token": pd.Categorical(tokens_for_frame(chunk, source),
+                                categories=list(TOKEN_TO_ID)),
+        "pc": chunk.get("pc", pd.Series([""] * len(chunk), index=chunk.index))
+        .astype(str).astype("category"),
+        "source": pd.Categorical([source] * len(chunk),
+                                 categories=ACTIVITY_FILES),
+        "row_id": chunk.index.to_numpy().astype(np.int32),
+    })
+    shifted = out["ts"] - pd.Timedelta(hours=day_start_hour)
+    out["day"] = shifted.dt.normalize()
+    out["hour"] = out["ts"].dt.hour.astype("int8")
+    out["weekday"] = out["ts"].dt.weekday.astype("int8")
+    return out
+
+
 def typed_events(release: "Release | Path", day_start_hour: int) -> pd.DataFrame:
     """One row per event: user, day, timestamp, token, pc, source, row index.
 
-    Returns a long frame. On the real release this is roughly 30 million rows
-    before capping, which is why the caller immediately reduces it.
+    Each source is read, reduced and *budgeted* before the next one is
+    touched. Budgeting early is the difference between holding twenty-eight
+    million web-visit rows and holding the ten million that survive the
+    per-user-day cap, and it means peak memory is set by the largest single
+    table rather than by their sum.
     """
     release = _as_release(release)
     frames = []
     for source in ACTIVITY_FILES:
+        parts = []
+        rows_read = 0
         for chunk in read_activity(release, source):
-            ts = parse_dates(chunk["date"])
-            tokens = chunk.apply(lambda r, s=source: token_for(s, r), axis=1)
-            frames.append(pd.DataFrame({
-                "user": chunk["user"].astype(str),
-                "ts": ts,
-                "token": tokens,
-                "pc": chunk.get("pc", pd.Series([""] * len(chunk))).astype(str),
-                "source": source,
-                "row_id": chunk.index.to_numpy(),
-                "event_id": chunk["id"].astype(str) if "id" in chunk else "",
-            }))
+            reduced = _reduce_chunk(chunk, source, day_start_hour)
+            rows_read += len(reduced)
+            parts.append(reduced)
+        if not parts:
+            continue
+        df = pd.concat(parts, ignore_index=True)
+        del parts
+        df = df.sort_values(["user", "day", "ts"], kind="stable")
+        df = _apply_source_budget(df)
+        log.info("  %-6s %10s rows read, %9s kept after the per-day budget "
+                 "(%.0f MB)", source, f"{rows_read:,}", f"{len(df):,}",
+                 df.memory_usage(deep=True).sum() / 1e6)
+        frames.append(df)
+
     if not frames:
         raise FileNotFoundError(f"no activity files found under {release.root}")
     ev = pd.concat(frames, ignore_index=True)
-    ev = ev.dropna(subset=["ts"])
-
-    # The 04:00 boundary: anything before it belongs to the previous day.
-    shifted = ev["ts"] - pd.Timedelta(hours=day_start_hour)
-    ev["day"] = shifted.dt.normalize()
-    ev["hour"] = ev["ts"].dt.hour.astype("int8")
-    ev["weekday"] = ev["ts"].dt.weekday.astype("int8")
+    del frames
+    log.info("typed %s events across %d sources (%.0f MB in memory)",
+             f"{len(ev):,}", len(ACTIVITY_FILES),
+             ev.memory_usage(deep=True).sum() / 1e6)
     return ev.sort_values(["user", "day", "ts"], kind="stable").reset_index(drop=True)
 
 
