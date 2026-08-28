@@ -1,6 +1,7 @@
 """Reading the release without unpacking it.
 
-Extracted, r4.2 is about 3 GB, and ``http.csv`` is 1.7 GB of that on its own.
+Extracted, r4.2 is over 17 GB, and ``http.csv`` is more than 14 GB of that
+on its own — see ``scripts/slim_release.py`` for what to do about it.
 Added to the 1.2 GB of tarballs you already downloaded, that is over four
 gigabytes of free disk needed to run a study whose output is three hundred
 megabytes. On a laptop that is often simply not there, and the failure arrives

@@ -35,7 +35,7 @@ building, and this repository does not present them as one.
 | `logon.csv` | ~0.9 M | Logon / logoff, per user and machine |
 | `device.csv` | ~0.4 M | Removable-media connect / disconnect |
 | `file.csv` | ~0.4 M | File access, with filename and content |
-| `http.csv` | ~28 M | Web visits, with URL and page text — 1.7 GB alone |
+| `http.csv` | ~28 M | Web visits, with URL and page text — over 14 GB alone |
 | `email.csv` | ~2.6 M | One row per delivery: to/cc/bcc, from, size, attachments, body |
 | `psychometric.csv` | 1,000 | Big Five (OCEAN) scores, one row per person |
 | `LDAP/*.csv` | 1,000 × 17 | Monthly directory snapshots: role, unit, department, team, supervisor |
@@ -78,6 +78,31 @@ around:
 
 The reduction is roughly forty to one, and the artefacts contain no readable
 message content — which is also what makes them safe to move between machines.
+
+### A second reduction, if the disk demanded one
+
+r4.2 is over 17 GB extracted, `http.csv` alone more than 14 GB. On a machine
+that cannot hold that, `scripts/slim_release.py` writes a working copy in
+which the `content` column of `file.csv`, `http.csv` and `email.csv` is
+truncated to a fixed prefix — 160 characters by default — and every other
+column is byte-identical to the release.
+
+This is a change to the content modality, not a storage detail, so it is
+recorded rather than assumed away:
+
+- `slim_manifest.json` in the working copy carries the character limit, the
+  row counts and how many rows were actually truncated
+- `prepare_local.py` copies that setting into the artefact manifest, so any
+  result produced from a slimmed copy carries the limit with it
+- `--content-chars 0` drops the column entirely, which is a legitimate
+  ablation of the content modality rather than a degraded run
+
+**What it costs.** Preparation already keeps only twelve documents per
+user-day, so the vast majority of this text is discarded regardless, and for
+web pages the topic sits at the front — title, lede, opening sentence. What is
+genuinely lost is the tail: a document whose distinguishing content appears
+late reads like its neighbours. Results produced from a slimmed copy should
+say so, and are not directly comparable with results from the full release.
 
 ## Known handling decisions
 

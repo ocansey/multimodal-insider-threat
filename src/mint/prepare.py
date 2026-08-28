@@ -47,6 +47,55 @@ log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
+# checkpointing
+# --------------------------------------------------------------------------
+"""Why this exists.
+
+Preparing the full release takes two to three hours, almost all of it bzip2
+decompression, and it runs on machines that stop when you stop looking at
+them — a Codespace idles out after thirty minutes, a laptop sleeps, an SSH
+session drops. Losing two hours to a closed lid is not a modelling problem but
+it is the difference between a project that finishes and one that does not.
+
+So every expensive stage writes a checkpoint and every rerun skips what is
+already done. The pipeline is deterministic, so resuming produces exactly the
+same artefacts as an uninterrupted run; there is a test that asserts it.
+
+Checkpoints live under ``data/cache`` and are keyed by the parameters that
+would change their contents. Delete the directory to force a clean run.
+"""
+
+
+def _cache_path(cache_dir: Path | None, name: str) -> Path | None:
+    if cache_dir is None:
+        return None
+    Path(cache_dir).mkdir(parents=True, exist_ok=True)
+    return Path(cache_dir) / name
+
+
+def _load_checkpoint(path: Path | None, label: str):
+    if path is None or not path.exists():
+        return None
+    try:
+        obj = pd.read_pickle(path)
+    except Exception as exc:  # noqa: BLE001 - a corrupt checkpoint is not fatal
+        log.warning("ignoring unreadable checkpoint %s (%s)", path.name, exc)
+        return None
+    log.info("resuming from checkpoint: %s (%s)", path.name, label)
+    return obj
+
+
+def _save_checkpoint(obj, path: Path | None, label: str) -> None:
+    if path is None:
+        return
+    tmp = path.with_suffix(path.suffix + ".partial")
+    pd.to_pickle(obj, tmp)
+    tmp.replace(path)          # atomic, so a kill mid-write cannot corrupt it
+    log.info("checkpointed %s (%s, %.0f MB)", path.name, label,
+             path.stat().st_size / 1e6)
+
+
+# --------------------------------------------------------------------------
 # organisational context
 # --------------------------------------------------------------------------
 def load_ldap(release: Release) -> pd.DataFrame:
@@ -390,24 +439,32 @@ def prepare(
     text_encoder_kind: str = "hashing",
     synthetic: bool = False,
     answers_dir: Path | None = None,
+    cache_dir: Path | None = None,
 ) -> Bundle:
     release = raw_dir if isinstance(raw_dir, Release) else Release(
         Path(raw_dir), extra=[answers_dir] if answers_dir else None)
     s_cfg, t_cfg = cfg.sessionisation, cfg.text
 
-    events = typed_events(release, int(s_cfg["day_start_hour"]))
-    days = pd.DatetimeIndex(np.sort(events["day"].unique()))
-    n_train = int(len(days) * float(cfg.split["train_fraction"]))
-    own_pc, shared = machine_context(events, days[:n_train],
-                                     int(s_cfg["shared_pc_min_users"]))
+    sessions_ckpt = _cache_path(cache_dir, "sessions.pkl")
+    sessions = _load_checkpoint(sessions_ckpt, "event sequences per user-day")
 
-    sessions = sessionise(
-        events, own_pc, shared,
-        max_events=int(s_cfg["max_events_per_day"]),
-        min_events=int(s_cfg["min_events_per_day"]),
-        after_hours_start=int(s_cfg["after_hours_start"]),
-        after_hours_end=int(s_cfg["after_hours_end"]),
-    )
+    if sessions is None:
+        events = typed_events(release, int(s_cfg["day_start_hour"]),
+                              cache_dir=cache_dir)
+        days = pd.DatetimeIndex(np.sort(events["day"].unique()))
+        n_train = int(len(days) * float(cfg.split["train_fraction"]))
+        own_pc, shared = machine_context(events, days[:n_train],
+                                         int(s_cfg["shared_pc_min_users"]))
+
+        sessions = sessionise(
+            events, own_pc, shared,
+            max_events=int(s_cfg["max_events_per_day"]),
+            min_events=int(s_cfg["min_events_per_day"]),
+            after_hours_start=int(s_cfg["after_hours_start"]),
+            after_hours_end=int(s_cfg["after_hours_end"]),
+        )
+        del events
+        _save_checkpoint(sessions, sessions_ckpt, "event sequences")
 
     answers = load_answers(release, int(s_cfg["day_start_hour"]))
     index = attach_labels_and_splits(sessions.index, answers, cfg.split)
@@ -416,8 +473,13 @@ def prepare(
     psych = load_psychometric(release)
     context, vocab = resolve_context(index, ldap, psych)
 
-    docs = collect_documents(release, sessions.doc_refs,
-                             int(t_cfg["max_docs_per_day"]), list(t_cfg["sources"]))
+    docs_ckpt = _cache_path(cache_dir, "documents.pkl")
+    docs = _load_checkpoint(docs_ckpt, "sampled document text")
+    if docs is None:
+        docs = collect_documents(release, sessions.doc_refs,
+                                 int(t_cfg["max_docs_per_day"]),
+                                 list(t_cfg["sources"]))
+        _save_checkpoint(docs, docs_ckpt, "document text")
     encoder = build_encoder(text_encoder_kind, t_cfg["encoder"],
                             int(t_cfg["dim"]), seed=cfg.seed)
     content = encode_documents(docs, encoder, int(t_cfg["max_docs_per_day"]),

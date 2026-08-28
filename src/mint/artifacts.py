@@ -1,6 +1,6 @@
 """The handoff format between the machine holding the data and the one modelling it.
 
-The real CERT release is 1.5 GB of raw text and there is no reason to move it
+The real CERT release is over 17 GB of raw text and there is no reason to move it
 anywhere. The preparation step reduces it, on whatever machine downloaded it,
 to five compact arrays that contain no raw message content — token ids,
 embeddings, context, an index and a manifest — and those are what the model

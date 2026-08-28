@@ -296,3 +296,68 @@ def test_a_missing_table_is_reported_not_guessed(tmp_path):
     release = Release(tmp_path)
     assert release.exists("logon.csv")
     assert not release.exists("http.csv")
+
+
+def test_vectorised_tokens_match_the_row_definition():
+    """The fast path and the readable definition must agree exactly.
+
+    ``token_for`` is the specification; ``tokens_for_frame`` is what actually
+    runs, because a per-row Python call over twenty-eight million web visits
+    costs half an hour per pass. Two implementations of one rule is a standing
+    invitation to drift, so the equivalence is asserted rather than assumed.
+    """
+    from mint.sessionise import token_for, tokens_for_frame
+
+    cases = {
+        "logon": pd.DataFrame({"activity": ["Logon", "Logoff", "logon"]}),
+        "device": pd.DataFrame({"activity": ["Connect", "Disconnect"]}),
+        "file": pd.DataFrame({"filename": [r"R:\\a.zip", r"C:\\b.docx", "/media/x"]}),
+        "http": pd.DataFrame({"url": ["http://a", "http://b"]}),
+        "email": pd.DataFrame({
+            "from": ["a@co.invalid", "b@co.invalid", "c@co.invalid",
+                     "z@co.invalid", "d@co.invalid"],
+            "user": ["a", "b", "c", "a", "d"],
+            "to": ["b@co.invalid", "out@else.invalid", "b@co.invalid",
+                   "a@co.invalid", np.nan],
+            "cc": [np.nan, np.nan, np.nan, np.nan, np.nan],
+            "bcc": ["", "", "", "", ""],
+            "attachments": [0, 0, 2, 0, 0],
+        }),
+    }
+    for source, frame in cases.items():
+        fast = list(tokens_for_frame(frame, source))
+        slow = [token_for(source, row) for _, row in frame.iterrows()]
+        assert fast == slow, f"{source}: {fast} != {slow}"
+
+
+def test_a_resumed_run_produces_identical_artefacts(fixture_dir, cfg, tmp_path):
+    """Checkpointing must be a pure optimisation, never a change of answer.
+
+    Preparing the full release takes hours on machines that stop when you stop
+    looking at them. Checkpoints make an interruption cheap — but only if
+    resuming lands in exactly the same place a clean run would, which is what
+    this asserts.
+    """
+    from mint.prepare import prepare
+
+    cache = tmp_path / "cache"
+    cold = prepare(fixture_dir, cfg, "hashing", synthetic=True, cache_dir=cache)
+    assert (cache / "sessions.pkl").exists()
+    assert (cache / "documents.pkl").exists()
+
+    warm = prepare(fixture_dir, cfg, "hashing", synthetic=True, cache_dir=cache)
+
+    assert len(cold) == len(warm)
+    assert (cold.tokens == warm.tokens).all()
+    assert (cold.content == warm.content).all()
+    assert cold.n_labelled_malicious == warm.n_labelled_malicious
+
+
+def test_a_corrupt_checkpoint_is_ignored_not_fatal(fixture_dir, cfg, tmp_path):
+    from mint.prepare import prepare
+
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    (cache / "sessions.pkl").write_bytes(b"not a pickle")
+    bundle = prepare(fixture_dir, cfg, "hashing", synthetic=True, cache_dir=cache)
+    assert len(bundle) > 0

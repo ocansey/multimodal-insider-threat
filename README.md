@@ -81,7 +81,7 @@ git clone https://github.com/ocansey/multimodal-insider-threat.git
 cd multimodal-insider-threat
 pip install -r requirements.txt
 
-make test     # 32 tests, no data required
+make test     # 44 tests, no data required
 make smoke    # generate a synthetic org, run the whole pipeline end to end
 ```
 
@@ -94,18 +94,36 @@ make smoke    # generate a synthetic org, run the whole pipeline end to end
 1. Download from CMU — free, no registration:
    [Insider Threat Test Dataset](https://kilthub.cmu.edu/articles/dataset/Insider_Threat_Test_Dataset/12841247). Take **`r4.2.tar.bz2`** and **`answers.tar.bz2`**.
 
-2. Reduce it. This runs where the data is and never moves the raw text anywhere:
+2. **Check your disk before you extract.** The archive is 4.6 GB and the file listing implies a few gigabytes unpacked. That is wrong for r4.2 by an order of magnitude: `http.csv` alone exceeds **14 GB** extracted, and the release as a whole is over **17 GB**. It does not fit alongside its own archive on a 32 GB machine. This surprised me twice, on two different machines, which is why it is the second thing in this section rather than a footnote.
+
+   Three routes, depending on what you have:
+
+| Disk free | Do this | Cost |
+|---|---|---|
+| 25 GB+ | `tar xjf r4.2.tar.bz2`, point `--raw` at the directory | none — the intended path |
+| 10–25 GB | `scripts/slim_release.py` — one pass, truncates the free text | a real reduction to the content modality, recorded in the manifest |
+| under 10 GB | point `--raw` at the tarball; members stream out of it | bzip2 cannot seek and `http.csv` is second in the archive, so every later table pays a full decompression of it, twice. Most of a day on one core. |
+
+   The middle route is the one I'd take on a laptop:
+
+```bash
+python scripts/slim_release.py --archive ~/Downloads/r4.2.tar.bz2 \
+    --answers ~/Downloads/answers.tar.bz2 --out data/raw/r4.2-slim
+```
+
+   It writes about 6 GB and keeps every column except the free text byte-identical. What it gives up is described honestly in its docstring and in the data card: the `content` column of `file`, `http` and `email` is cut to a fixed prefix, 160 characters by default. Preparation already discards almost all of that text — twelve documents survive per user-day out of tens of millions — and for web pages the topic is front-loaded. The tail is genuinely lost, `--content-chars` raises the limit if you have the room, and `--content-chars 0` drops the column entirely, which is a clean ablation rather than a mistake.
+
+3. Reduce it. This runs where the data is and never moves the raw text anywhere:
 
 ```bash
 pip install sentence-transformers          # or use --text-encoder hashing
-python scripts/prepare_local.py --raw ~/Downloads --out data/artifacts/cert
+python scripts/prepare_local.py --raw data/raw/r4.2-slim \
+    --answers data/raw/r4.2-slim/answers --out data/artifacts/cert
 ```
 
-**Extraction is optional.** Unpacked, the release is about 3 GB and `http.csv` is 1.7 GB of that; added to the tarballs you already have, that is over four gigabytes of free disk for a study whose output is three hundred megabytes. If the space is not there, do not extract — point `--raw` at the tarball or the folder holding it and the loader streams members straight out of the archive. That costs roughly double the read time for `http.csv`, because bzip2 cannot seek and the pipeline reads each table twice, and it costs no disk at all.
+Twenty minutes to an hour, mostly reading `http.csv` and running the encoder. Peak memory around 4 GB. Add `--sample-users 100` for a five-minute trial pass first. The run checkpoints per source under `--cache`, so an interrupted preparation resumes rather than starting over.
 
-Twenty minutes to an hour either way, mostly reading `http.csv` and running the encoder. Peak memory around 4 GB. Add `--sample-users 100` for a five-minute trial pass first.
-
-3. Train and evaluate:
+4. Train and evaluate:
 
 ```bash
 python scripts/run_experiment.py --artifacts data/artifacts/cert
@@ -113,7 +131,7 @@ python scripts/run_experiment.py --artifacts data/artifacts/cert
 
 ### What the reduction step does, and why
 
-The raw release is 1.5 GB, most of it web-page text. The preparation step keeps the twelve most informative documents per user-day, encodes them once, projects the embeddings from 384 dimensions to 64 with a PCA **fitted on the training window only**, and writes about 300 MB of arrays containing no raw message content.
+The raw release is over 17 GB, most of it web-page text. The preparation step keeps the twelve most informative documents per user-day, encodes them once, projects the embeddings from 384 dimensions to 64 with a PCA **fitted on the training window only**, and writes about 300 MB of arrays containing no raw message content.
 
 The PCA detail is not housekeeping. Fitting it on everything would let the test period shape the representation of the training period — leakage with no label in sight, which is the kind that never shows up as an obviously wrong number.
 
@@ -131,7 +149,11 @@ Four things in here were bugs first, and each is documented at the point where i
 
 **Sessionisation took eighteen seconds on a toy dataset**, which extrapolated to over an hour on the real release. Rewriting the per-source event budget as vectorised group arithmetic instead of a Python loop took it to half a second — a 37× speedup on the step that has to process thirty million rows.
 
-**Extraction ran the disk out of space**, halfway through `http.csv`, leaving a truncated file that still looked like a file. The fix was not to ask for a bigger disk: `mint/sources.py` resolves every table to a byte stream and reads members directly out of the `.tar.bz2`, so the release never has to be unpacked at all. A test asserts the archive path and the extracted path produce byte-identical token arrays, because a convenience that quietly changes the numbers is worse than the inconvenience it removes.
+**Extraction ran the disk out of space**, halfway through `http.csv`, leaving a truncated file that still looked like a file. The first fix was `mint/sources.py`, which resolves every table to a byte stream and reads members directly out of the `.tar.bz2` so the release never has to be unpacked. A test asserts the archive path and the extracted path produce byte-identical token arrays, because a convenience that quietly changes the numbers is worse than the inconvenience it removes.
+
+**Then it ran the disk out of space again, on a machine three times larger**, and that one was my own fault rather than the disk's. I had taken the release size from the published file listing — about 3 GB, `http.csv` 1.7 GB — and repeated it in this README, in three module docstrings and in the data card without measuring it. The real `http.csv` is over **14 GB** and r4.2 as a whole is over **17 GB**. Every size claim in the repository was wrong by roughly an order of magnitude, and streaming from the archive did not rescue it either: bzip2 cannot seek and `http.csv` is the *second* member, so each of the four later tables pays a full decompression of it, twice over. What looked like a clever way to avoid unpacking was a way to turn forty minutes of I/O into most of a day.
+
+`scripts/slim_release.py` is the actual fix: one sequential pass that writes a working copy with the free-text columns cut to a fixed prefix, around 6 GB out of a 4.6 GB archive. It is parsed with the `csv` module rather than trimmed by line length, which sounds fussy until you notice that page content contains commas, quotes and newlines — byte truncation corrupts the column count on exactly the rows whose text is least ordinary, and pandas then drops or shifts them without raising. A biased sample of lost rows is much worse than a smaller file.
 
 ## Repository layout
 
@@ -150,8 +172,8 @@ src/mint/
   evaluate.py     capacity queues, campaign recall, time to detection, burden
   pipeline.py     one call, every table
 
-scripts/  prepare_local.py · run_experiment.py
-tests/    32 tests: invariants, hand-worked metrics, and the no-fake-results guard
+scripts/  slim_release.py · prepare_local.py · run_experiment.py
+tests/    44 tests: invariants, hand-worked metrics, and the no-fake-results guard
 docs/     METHODOLOGY.md · DATA_CARD.md · ETHICS_AND_DEPLOYMENT.md
 config/   every threshold and split boundary a reviewer might argue with
 ```

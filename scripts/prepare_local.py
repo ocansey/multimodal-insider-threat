@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reduce the raw CERT release to model-ready artefacts. Run this where the data is.
 
-The release is roughly 1.5 GB of CSV, most of it web-page text. There is no
+The release is over 17 GB of CSV, most of it web-page text. There is no
 reason to move that anywhere. This script reads it in place, keeps the twelve
 most informative documents per user-day, encodes them once with a sentence
 transformer, projects the embeddings down, and writes about 300 MB of arrays
@@ -13,14 +13,24 @@ that contain no raw message content at all.
     # or, if you did extract
     python scripts/prepare_local.py --raw ~/Downloads/r4.2 --out data/artifacts/cert
 
-Extracted, the release is about 3 GB and http.csv is 1.7 GB of that. If the
-disk cannot spare it, do not extract: the loader reads members straight out of
-the .tar.bz2. That costs roughly double the read time for http.csv, since
-bzip2 cannot seek and the pipeline reads each table twice, and it costs no
-disk at all.
+A warning about size, learned the hard way. The published file listing implies
+a few gigabytes. It is wrong for r4.2: http.csv alone exceeds 14 GB extracted
+and the whole release is over 17 GB, which does not fit alongside the 4.6 GB
+archive on a 32 GB machine. Two ways round it, and they trade different costs:
 
-Expect twenty minutes to an hour, dominated by reading http.csv and by the
-encoder. Everything is streamed, so peak memory stays around 4 GB.
+  Streaming from the tarball needs no disk, but bzip2 cannot seek and
+  http.csv sits second in the archive, so every later table pays a full
+  decompression of it — twice, because each table is read twice. Measured on
+  one core, that is most of a day.
+
+  ``scripts/slim_release.py`` makes a single pass and writes a working copy
+  with the free-text columns truncated, about 6 GB at the default setting.
+  That is a real reduction to the content modality and it is recorded in the
+  manifest rather than hidden. Read its docstring before using it.
+
+Expect twenty minutes to an hour from a directory, dominated by reading
+http.csv and by the encoder. Everything is streamed, so peak memory stays
+around 4 GB.
 
 Two flags worth knowing:
 
@@ -132,6 +142,35 @@ def maybe_subset(release: Release, n_users: int, workdir: Path) -> Path:
     return workdir
 
 
+def record_source_reduction(release: Release, out: Path) -> None:
+    """Carry a slimmed release's truncation setting into the artefacts.
+
+    If the working copy was built by ``slim_release.py`` then its free text was
+    cut to a fixed prefix, and results computed from it are not comparable
+    with results from the full release. That fact has to travel with the
+    artefacts rather than living in the shell history of whoever ran the
+    reduction, so it is written into the manifest that every downstream table
+    is stamped from.
+    """
+    if not release.directory:
+        return
+    slim = release.directory / "slim_manifest.json"
+    if not slim.exists():
+        return
+    reduction = json.loads(slim.read_text(encoding="utf-8"))
+    manifest_path = out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_reduction"] = {
+        "content_chars": reduction.get("content_chars"),
+        "tables": reduction.get("content_truncated_tables"),
+        "source_archive": reduction.get("source_archive"),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    print(f"\nnote: this release was slimmed — free text truncated to "
+          f"{reduction.get('content_chars')} characters. Recorded in the "
+          "manifest; cite it with any result.")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -145,6 +184,10 @@ def main() -> int:
     ap.add_argument("--answers", type=Path, default=None,
                     help="answers.tar.bz2 or the extracted answers directory, "
                          "if it is not beside the activity files")
+    ap.add_argument("--cache", type=Path, default=Path("data/cache"),
+                    help="checkpoint directory; a rerun resumes from here "
+                         "rather than re-reading the archive. Pass 'none' to "
+                         "disable.")
     ap.add_argument("--sample-users", type=int, default=0,
                     help="prepare only the first N users, for a trial run")
     args = ap.parse_args()
@@ -167,9 +210,11 @@ def main() -> int:
 
     out = (args.out or cfg.path("artifacts") / "cert").expanduser()
     started = time.time()
+    cache = None if str(args.cache).lower() == "none" else args.cache
     bundle = prepare(release, cfg, text_encoder_kind=args.text_encoder,
-                     synthetic=False)
+                     synthetic=False, cache_dir=cache)
     save(bundle, out)
+    record_source_reduction(release, out)
 
     total = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     print("\n" + "=" * 68)

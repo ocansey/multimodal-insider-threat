@@ -53,8 +53,8 @@ COLUMNS: dict[str, list[str]] = {
 }
 
 #: Columns that carry natural language. These are the second modality, and
-#: they are also the reason the raw release is 1.5 GB — http.csv alone is
-#: 28 million rows of page text.
+#: they are also the reason the release is enormous — http.csv alone is
+#: 28 million rows of page text, over 14 GB extracted.
 TEXT_COLUMNS = {"file": "content", "http": "content", "email": "content"}
 
 

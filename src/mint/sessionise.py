@@ -73,7 +73,7 @@ def read_activity(
 ) -> Iterator[pd.DataFrame]:
     """Yield chunks of one activity table, wherever it physically lives.
 
-    The real ``http.csv`` is 1.7 GB and will not fit comfortably in memory
+    The real ``http.csv`` is over 14 GB and will not fit in memory
     alongside a model, so everything downstream consumes an iterator even when
     there is only one chunk in it. The source may be a plain CSV, a compressed
     CSV, or a member inside the downloaded tarball — see :mod:`mint.sources`.
@@ -272,7 +272,8 @@ def _reduce_chunk(chunk: pd.DataFrame, source: str, day_start_hour: int
     return out
 
 
-def typed_events(release: "Release | Path", day_start_hour: int) -> pd.DataFrame:
+def typed_events(release: "Release | Path", day_start_hour: int,
+                 cache_dir: "Path | None" = None) -> pd.DataFrame:
     """One row per event: user, day, timestamp, token, pc, source, row index.
 
     Each source is read, reduced and *budgeted* before the next one is
@@ -284,6 +285,24 @@ def typed_events(release: "Release | Path", day_start_hour: int) -> pd.DataFrame
     release = _as_release(release)
     frames = []
     for source in ACTIVITY_FILES:
+        # Each source is checkpointed on its own, because the run may well be
+        # interrupted between two of them and re-decompressing a 4.8 GB
+        # archive to recover work already done is an hour nobody has.
+        ckpt = None
+        if cache_dir is not None:
+            Path(cache_dir).mkdir(parents=True, exist_ok=True)
+            ckpt = Path(cache_dir) / f"typed_{source}.pkl"
+            if ckpt.exists():
+                try:
+                    cached = pd.read_pickle(ckpt)
+                    log.info("  %-6s resumed from checkpoint (%s rows)",
+                             source, f"{len(cached):,}")
+                    frames.append(cached)
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("  %-6s checkpoint unreadable (%s); re-reading",
+                                source, exc)
+
         parts = []
         rows_read = 0
         for chunk in read_activity(release, source):
@@ -299,6 +318,10 @@ def typed_events(release: "Release | Path", day_start_hour: int) -> pd.DataFrame
         log.info("  %-6s %10s rows read, %9s kept after the per-day budget "
                  "(%.0f MB)", source, f"{rows_read:,}", f"{len(df):,}",
                  df.memory_usage(deep=True).sum() / 1e6)
+        if ckpt is not None:
+            tmp = ckpt.with_suffix(".partial")
+            pd.to_pickle(df, tmp)
+            tmp.replace(ckpt)
         frames.append(df)
 
     if not frames:

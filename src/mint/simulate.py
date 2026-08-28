@@ -5,7 +5,7 @@ module is for would be worse than not having it.
 
 **Nothing produced here is ever a result.** It exists so that the pipeline can
 be developed, unit-tested and run in continuous integration without the real
-1.5 GB release, and so that a reviewer who clones the repository can watch the
+17 GB release, and so that a reviewer who clones the repository can watch the
 whole thing work end to end in ninety seconds before deciding whether to spend
 an hour downloading real data. Every artefact it writes is stamped
 ``synthetic: true`` in the manifest, :func:`mint.artifacts.load` refuses to
