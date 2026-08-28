@@ -1,0 +1,8 @@
+nohup: ignoring input
+23:33:04  INFO    projecting about 5.8 GB of output; 10.6 GB free at /workspaces/multimodal-insider-threat/data/raw/r4.2-slim
+23:33:04  INFO    reading r4.2.tar.bz2 (4.5 GB)
+23:33:04  INFO      file.csv         truncating content to 160 chars
+23:33:15  INFO      file.csv         445,581 rows, 422,321 truncated, 96.9 MB, 0.2 min
+23:33:15  INFO      license.txt      3.8 KB (copied unchanged)
+23:33:15  INFO      http.csv         truncating content to 160 chars
+23:34:24  INFO          2,000,000 rows, 604.3 MB written, 69s elapsed

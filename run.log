@@ -1,0 +1,11 @@
+nohup: ignoring input
+Traceback (most recent call last):
+  File "/workspaces/multimodal-insider-threat/scripts/run_experiment.py", line 130, in <module>
+    raise SystemExit(main())
+                     ^^^^^^
+  File "/workspaces/multimodal-insider-threat/scripts/run_experiment.py", line 80, in main
+    bundle = load(args.artifacts)
+             ^^^^^^^^^^^^^^^^^^^^
+  File "/workspaces/multimodal-insider-threat/src/mint/artifacts.py", line 166, in load
+    raise FileNotFoundError(
+FileNotFoundError: no manifest at data/artifacts/cert/manifest.json. Run scripts/prepare_local.py (real data) or `make fixture` (synthetic smoke test) first.

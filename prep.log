@@ -1,0 +1,10 @@
+nohup: ignoring input
+23:35:08  INFO    release rooted at /workspaces/multimodal-insider-threat/data/raw/r4.2-slim (0 archives, directory=/workspaces/multimodal-insider-threat/data/raw/r4.2-slim)
+reading from: directory /workspaces/multimodal-insider-threat/data/raw/r4.2-slim
+
+cannot find logon.csv, device.csv, email.csv in directory /workspaces/multimodal-insider-threat/data/raw/r4.2-slim.
+
+Point --raw at one of:
+  the directory containing logon.csv, or
+  the r4.2.tar.bz2 file itself (no extraction needed), or
+  the folder holding the tarballs.
